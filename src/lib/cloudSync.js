@@ -19,7 +19,8 @@ export const MIN_CODE_LENGTH = 8;
 
 const pendingPush = new Map();
 let statusListeners = new Set();
-let status = { state: 'off', message: '', at: localStorage.getItem(LAST_SYNC_KEY) || '' };
+const hasStorage = () => typeof localStorage !== 'undefined';
+let status = { state: 'off', message: '', at: (hasStorage() && localStorage.getItem(LAST_SYNC_KEY)) || '' };
 
 function setStatus(next) {
     status = { ...status, ...next };
@@ -40,7 +41,7 @@ export function onSyncStatus(listener) {
 }
 
 export function getSyncCode() {
-    return localStorage.getItem(CODE_KEY) || '';
+    return (hasStorage() && localStorage.getItem(CODE_KEY)) || '';
 }
 
 export function setSyncCode(code) {
@@ -69,6 +70,13 @@ export async function syncKeyFor(code) {
     const bytes = new TextEncoder().encode(`ai-hanzi-tutor:${code}`);
     const digest = await crypto.subtle.digest('SHA-256', bytes);
     return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// 给 /api/ai、/api/llm 用：带上家庭同步码的 hash，没填同步码时返回空
+export async function familyAuthHeaders() {
+    if (!getSyncCode()) return {};
+    if (!cachedKey) cachedKey = await syncKeyFor(getSyncCode());
+    return { 'X-Sync-Key': cachedKey };
 }
 
 async function headers() {

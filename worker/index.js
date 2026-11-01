@@ -34,7 +34,7 @@ function corsHeaders() {
     return {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Sync-Key',
     };
 }
 
@@ -45,10 +45,13 @@ function jsonEnvelope(obj) {
     });
 }
 
-async function handleLlmProxy(request) {
+async function handleLlmProxy(request, env) {
     if (request.method === 'OPTIONS') {
         return new Response(null, { status: 204, headers: corsHeaders() });
     }
+    if (!isSameOrigin(request)) return jsonEnvelope({ ok: false, status: 403, error: '不允许跨站调用' });
+    const auth = await authorizeFamily(request, env);
+    if (!auth.ok) return jsonEnvelope({ ok: false, status: auth.status, error: auth.error });
     if (request.method !== 'POST') {
         return jsonEnvelope({ ok: false, status: 405, error: '仅支持 POST' });
     }
@@ -154,14 +157,51 @@ function ensureSchema(db) {
     return schemaReady;
 }
 
+// ---------------- 家长主人码（防止外人用本站 AI / 同步） ----------------
+// 零配置：第一个用“家庭同步码”访问本站的家庭自动成为主人（记在 D1 的 site_owner 表），
+// 之后 /api/ai、/api/llm、/api/sync 只接受这个家庭的同步码。
+// 想换主人：Cloudflare 控制台 → D1 → 执行 DELETE FROM site_owner; 然后用新同步码打开一次。
+let ownerSchemaReady = null;
+function ensureOwnerSchema(db) {
+    if (!ownerSchemaReady) {
+        ownerSchemaReady = db.prepare('CREATE TABLE IF NOT EXISTS site_owner (id INTEGER PRIMARY KEY CHECK (id = 1), family TEXT NOT NULL, created_at TEXT NOT NULL)')
+            .run().catch(error => { ownerSchemaReady = null; throw error; });
+    }
+    return ownerSchemaReady;
+}
+
+export async function familyForKey(syncKey) {
+    return sha256Hex(`family:${syncKey}`);
+}
+
+// 返回 { ok: true, family } 或 { ok: false, status, error }
+export async function authorizeFamily(request, env) {
+    if (!env.DB) return { ok: false, status: 503, error: '服务器还没有绑定 D1 数据库（重新部署一次即可自动创建）' };
+    const syncKey = request.headers.get('X-Sync-Key');
+    if (!isSyncKeyValid(syncKey)) return { ok: false, status: 401, error: '请先在「设置」里填写家庭同步码，才能使用 AI 和云同步' };
+    const family = await familyForKey(syncKey);
+    await ensureOwnerSchema(env.DB);
+    let row = await env.DB.prepare('SELECT family FROM site_owner WHERE id = 1').first();
+    if (!row) {
+        // 老数据兼容：已经有同步数据的家庭优先成为主人
+        await ensureSchema(env.DB);
+        const existing = await env.DB.prepare('SELECT family FROM workspaces LIMIT 1').first();
+        await env.DB.prepare('INSERT OR IGNORE INTO site_owner (id, family, created_at) VALUES (1, ?1, ?2)')
+            .bind(existing?.family || family, new Date().toISOString()).run();
+        row = await env.DB.prepare('SELECT family FROM site_owner WHERE id = 1').first();
+    }
+    if (row?.family !== family) return { ok: false, status: 403, error: '家庭同步码不对：这个网站只给自家人用' };
+    return { ok: true, family };
+}
+
 async function handleSync(request, env, url) {
     if (!env.DB) return syncJson({ ok: false, error: '服务器还没有绑定 D1 数据库（重新部署一次即可自动创建）' }, 503);
     if (!isSameOrigin(request)) return syncJson({ ok: false, error: '不允许跨站调用' }, 403);
     const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
     if (syncRateLimited(ip)) return syncJson({ ok: false, error: '同步太频繁，请稍后再试' }, 429);
-    const syncKey = request.headers.get('X-Sync-Key');
-    if (!isSyncKeyValid(syncKey)) return syncJson({ ok: false, error: '缺少家庭同步码' }, 401);
-    const family = await sha256Hex(`family:${syncKey}`);
+    const auth = await authorizeFamily(request, env);
+    if (!auth.ok) return syncJson({ ok: false, error: auth.error }, auth.status);
+    const family = auth.family;
     await ensureSchema(env.DB);
 
     const rest = url.pathname.replace(/^\/api\/sync\/?/, '').replace(/\/+$/, '');
@@ -294,6 +334,8 @@ async function addUsage(env, neurons) {
 async function handleWorkersAI(request, env) {
     if (!isSameOrigin(request)) return syncJson({ ok: false, error: '不允许跨站调用' }, 403);
     if (!env.AI) return syncJson({ ok: false, error: '服务器还没有绑定 Workers AI（用最新代码重新部署一次即可）' }, 503);
+    const auth = await authorizeFamily(request, env);
+    if (!auth.ok) return syncJson({ ok: false, error: auth.error }, auth.status);
 
     if (request.method === 'GET') {
         const usage = await readUsage(env).catch(() => ({ neurons: 0, requests: 0 }));
@@ -354,7 +396,11 @@ export default {
     async fetch(request, env) {
         const url = new URL(request.url);
         if (url.pathname === '/api/llm' || url.pathname.startsWith('/api/llm/')) {
-            return handleLlmProxy(request);
+            try {
+                return await handleLlmProxy(request, env);
+            } catch {
+                return jsonEnvelope({ ok: false, status: 500, error: '代理服务出错，请稍后再试' });
+            }
         }
         if (url.pathname === '/api/sync' || url.pathname.startsWith('/api/sync/')) {
             try {

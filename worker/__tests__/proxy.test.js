@@ -55,6 +55,7 @@ import { estimateNeurons, extractWorkersAIText, stripThinking, WORKERS_AI_MODELS
 
 function fakeUsageDb() {
     const rows = new Map();
+    let owner = null;
     return {
         rows,
         prepare(sql) {
@@ -62,6 +63,7 @@ function fakeUsageDb() {
                 args: [],
                 bind(...args) { stmt.args = args; return stmt; },
                 async run() {
+                    if (sql.startsWith('INSERT OR IGNORE INTO site_owner') && !owner) owner = { family: stmt.args[0] };
                     if (sql.startsWith('INSERT INTO ai_usage')) {
                         const [day, neurons] = stmt.args;
                         const row = rows.get(day) || { neurons: 0, requests: 0 };
@@ -69,17 +71,21 @@ function fakeUsageDb() {
                     }
                     return {};
                 },
-                async first() { return rows.get(stmt.args[0]) || null; },
+                async first() {
+                    if (sql.startsWith('SELECT family FROM site_owner')) return owner;
+                    if (sql.startsWith('SELECT family FROM workspaces')) return null;
+                    return rows.get(stmt.args[0]) || null;
+                },
             };
             return stmt;
         },
     };
 }
 
-function aiRequest(body, origin = 'https://kid.example') {
+function aiRequest(body, origin = 'https://kid.example', syncKey = 'a'.repeat(64)) {
     return new Request('https://kid.example/api/ai', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Origin: origin, 'CF-Connecting-IP': `ip-${Math.random()}` },
+        headers: { 'Content-Type': 'application/json', Origin: origin, 'CF-Connecting-IP': `ip-${Math.random()}`, ...(syncKey ? { 'X-Sync-Key': syncKey } : {}) },
         body: JSON.stringify(body),
     });
 }
@@ -121,6 +127,13 @@ describe('Cloudflare Workers AI（免 Key）', () => {
         expect((await worker.fetch(aiRequest({ messages: [{ role: 'user', content: 'hi' }] }, 'https://evil.example'), env)).status).toBe(403);
         const img = [{ role: 'user', content: [{ type: 'text', text: '看图' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AA' } }] }];
         expect((await worker.fetch(aiRequest({ model: '@cf/qwen/qwen3-30b-a3b-fp8', messages: img }), env)).status).toBe(400);
+    });
+
+    it('没填同步码或同步码不对就拒绝', async () => {
+        const env = { DB: fakeUsageDb(), AI: { async run() { return { response: 'x' }; } } };
+        expect((await worker.fetch(aiRequest({ messages: [{ role: 'user', content: 'hi' }] }, undefined, null), env)).status).toBe(401);
+        expect((await worker.fetch(aiRequest({ messages: [{ role: 'user', content: 'hi' }] }), env)).status).toBe(200);
+        expect((await worker.fetch(aiRequest({ messages: [{ role: 'user', content: 'hi' }] }, undefined, 'b'.repeat(64)), env)).status).toBe(403);
     });
 
     it('没有绑定 AI 时提示重新部署', async () => {

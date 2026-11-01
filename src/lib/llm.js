@@ -1,3 +1,4 @@
+import { familyAuthHeaders } from './cloudSync.js';
 export function normalizeOpenAIUrl(url) {
   const clean = (url || '').trim().replace(/\/+$/, '');
   if (!clean) return 'https://api.openai.com/v1/chat/completions';
@@ -29,7 +30,7 @@ function geminiPayloadToMessages(payload) {
 async function requestViaProxy({ target, apiKey, method, body }) {
   const response = await fetch('/api/llm', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await familyAuthHeaders()) },
     body: JSON.stringify({ target, apiKey, method, body: body ?? null })
   });
   const envelope = await response.json();
@@ -52,7 +53,7 @@ async function callWorkersAI({ model, payload }) {
   try {
     const response = await fetch('/api/ai', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(await familyAuthHeaders()) },
       body: JSON.stringify({ model: model || CLOUDFLARE_DEFAULT_MODEL, messages: geminiPayloadToMessages(payload), temperature: 0.4 })
     });
     let data = null;
@@ -69,7 +70,7 @@ async function callWorkersAI({ model, payload }) {
 
 export async function getWorkersAIStatus() {
   try {
-    const response = await fetch('/api/ai', { headers: { 'Content-Type': 'application/json' } });
+    const response = await fetch('/api/ai', { headers: { 'Content-Type': 'application/json', ...(await familyAuthHeaders()) } });
     const data = await response.json();
     return data?.ok ? data : { error: data?.error || `请求失败 (${response.status})` };
   } catch {
