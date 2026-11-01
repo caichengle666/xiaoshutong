@@ -206,7 +206,7 @@
 ### 第 1 步：Fork 或克隆仓库
 
 ```bash
-git clone https://github.com/caichengle666/AI-Hanzi-Tutor.git
+git clone https://github.com/caichengle666/xiaoshutong.git
 ```
 
 ### 第 2 步：改成你自己的 Cloudflare 账号
@@ -215,7 +215,7 @@ git clone https://github.com/caichengle666/AI-Hanzi-Tutor.git
 
 ```jsonc
 {
-  "name": "damp-tree-d795",            // Worker 名字，可改成你喜欢的
+  "name": "xiaoshutong",            // Worker 名字，可改成你喜欢的
   "account_id": "你的 Cloudflare 账号 ID", // 控制台右侧栏 / 账户首页可以看到
   ...
   "d1_databases": [
