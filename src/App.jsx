@@ -212,7 +212,7 @@ export default function App() {
             <header className="bg-white/90 backdrop-blur p-4 md:px-8 shadow-sm flex justify-between items-center z-50 sticky top-0">
                 <div className="flex items-center gap-3 cursor-pointer active:scale-95 transition-transform" onClick={() => setMode('home')}>
                     <div className="bg-orange-500 p-2 rounded-xl text-white shadow-orange-200 shadow-md"><Icon name="home" size={24} /></div>
-                    <span className="font-bold text-slate-700 text-lg md:text-xl tracking-tight">AI全能识字</span>
+                    <span className="font-bold text-slate-700 text-lg md:text-xl tracking-tight">小书童</span>
                 </div>
                 <div className="flex items-center gap-4">
                     {syncStatus.state === 'error' && <button onClick={() => runSync().catch(() => {})} title={syncStatus.message} className="text-xs font-bold text-amber-600 bg-amber-50 border border-amber-100 px-2 py-1 rounded-lg">同步失败，重试</button>}

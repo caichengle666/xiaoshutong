@@ -1,6 +1,6 @@
 {
-  "name": "AI全能识字助手",
-  "short_name": "AI识字",
+  "name": "小书童 · AI 学习伙伴",
+  "short_name": "小书童",
   "description": "识字、笔顺、听写和错题练习工具",
   "start_url": "/",
   "scope": "/",
