@@ -50,3 +50,81 @@ describe('D1 云同步保护', () => {
         expect(res.status).toBe(503);
     });
 });
+
+import { estimateNeurons, extractWorkersAIText, stripThinking, WORKERS_AI_MODELS } from '../index.js';
+
+function fakeUsageDb() {
+    const rows = new Map();
+    return {
+        rows,
+        prepare(sql) {
+            const stmt = {
+                args: [],
+                bind(...args) { stmt.args = args; return stmt; },
+                async run() {
+                    if (sql.startsWith('INSERT INTO ai_usage')) {
+                        const [day, neurons] = stmt.args;
+                        const row = rows.get(day) || { neurons: 0, requests: 0 };
+                        rows.set(day, { neurons: row.neurons + neurons, requests: row.requests + 1 });
+                    }
+                    return {};
+                },
+                async first() { return rows.get(stmt.args[0]) || null; },
+            };
+            return stmt;
+        },
+    };
+}
+
+function aiRequest(body, origin = 'https://kid.example') {
+    return new Request('https://kid.example/api/ai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: origin, 'CF-Connecting-IP': `ip-${Math.random()}` },
+        body: JSON.stringify(body),
+    });
+}
+
+describe('Cloudflare Workers AI（免 Key）', () => {
+    it('估算 neurons 和解析返回', () => {
+        const id = '@cf/google/gemma-4-26b-a4b-it';
+        expect(estimateNeurons(id, { prompt_tokens: 1_000_000, completion_tokens: 0 })).toBe(WORKERS_AI_MODELS[id].input);
+        expect(extractWorkersAIText({ choices: [{ message: { content: '你好' } }] })).toBe('你好');
+        expect(extractWorkersAIText({ response: 'hi' })).toBe('hi');
+        expect(stripThinking('<think>想一想</think>答案')).toBe('答案');
+    });
+
+    it('正常调用并记录用量，未知模型回落到默认模型', async () => {
+        const calls = [];
+        const env = {
+            DB: fakeUsageDb(),
+            AI: { async run(model, input) { calls.push({ model, input }); return { choices: [{ message: { content: '连接正常' } }], usage: { prompt_tokens: 100, completion_tokens: 10 } }; } },
+        };
+        const res = await worker.fetch(aiRequest({ model: 'evil/model', messages: [{ role: 'user', content: 'hi' }] }), env);
+        const data = await res.json();
+        expect(data).toMatchObject({ ok: true, text: '连接正常' });
+        expect(calls[0].model).toBe('@cf/google/gemma-4-26b-a4b-it');
+        expect([...env.DB.rows.values()][0].requests).toBe(1);
+    });
+
+    it('超过每日额度就停止调用', async () => {
+        const db = fakeUsageDb();
+        db.rows.set(new Date().toISOString().slice(0, 10), { neurons: 99999, requests: 5 });
+        let called = false;
+        const env = { DB: db, AI: { async run() { called = true; return {}; } } };
+        const res = await worker.fetch(aiRequest({ messages: [{ role: 'user', content: 'hi' }] }), env);
+        expect(res.status).toBe(429);
+        expect(called).toBe(false);
+    });
+
+    it('拒绝跨站调用、文字模型收到图片', async () => {
+        const env = { DB: fakeUsageDb(), AI: { async run() { return { response: 'x' }; } } };
+        expect((await worker.fetch(aiRequest({ messages: [{ role: 'user', content: 'hi' }] }, 'https://evil.example'), env)).status).toBe(403);
+        const img = [{ role: 'user', content: [{ type: 'text', text: '看图' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AA' } }] }];
+        expect((await worker.fetch(aiRequest({ model: '@cf/qwen/qwen3-30b-a3b-fp8', messages: img }), env)).status).toBe(400);
+    });
+
+    it('没有绑定 AI 时提示重新部署', async () => {
+        const res = await worker.fetch(aiRequest({ messages: [{ role: 'user', content: 'hi' }] }), { DB: fakeUsageDb() });
+        expect(res.status).toBe(503);
+    });
+});

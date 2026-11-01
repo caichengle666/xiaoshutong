@@ -4,10 +4,10 @@ import { useSpeechVoices } from '../hooks/useSpeechVoices.js';
 import { loadReminder, saveReminder } from '../lib/reminder.js';
 import { getVoiceDownloadGuide, supportsSpeechSynthesis } from '../lib/deviceVoiceGuide.js';
 import { setVisionSupport } from '../lib/aiCapabilities.js';
-import { callLLM as requestLLM, listModels } from '../lib/llm.js';
+import { callLLM as requestLLM, listModels, CLOUDFLARE_MODELS, CLOUDFLARE_DEFAULT_MODEL, getWorkersAIStatus } from '../lib/llm.js';
 import { MIN_CODE_LENGTH, getSyncCode, setSyncCode } from '../lib/cloudSync.js';
 
-const DEFAULT_MODELS = ['gemini-3-flash-preview', 'gemini-3-pro-preview', 'gemini-2.0-flash-exp', 'gpt-4o-mini', 'gpt-4o', 'deepseek-chat'];
+const DEFAULT_MODELS = [...CLOUDFLARE_MODELS.map(item => item.id), 'gemini-3-flash-preview', 'gemini-3-pro-preview', 'gemini-2.0-flash-exp', 'gpt-4o-mini', 'gpt-4o', 'deepseek-chat'];
 
 function VoiceDownloadGuide({ language, hasVoices }) {
     const guide = getVoiceDownloadGuide();
@@ -57,6 +57,15 @@ export default function SettingsView({
     const [reminder, setReminder] = useState(() => loadReminder(activeProfileId));
     const [syncCode, setSyncCodeInput] = useState(() => getSyncCode());
     const [syncMessage, setSyncMessage] = useState('');
+    const [cfStatus, setCfStatus] = useState(null);
+    const isCloudflare = p === 'cloudflare';
+
+    useEffect(() => {
+        if (!isCloudflare) return;
+        let cancelled = false;
+        getWorkersAIStatus().then(status => { if (!cancelled) setCfStatus(status); });
+        return () => { cancelled = true; };
+    }, [isCloudflare]);
 
     const syncNow = async () => {
         const code = syncCode.trim();
@@ -75,6 +84,11 @@ export default function SettingsView({
     const englishVoiceList = useSpeechVoices('en');
 
     useEffect(() => {
+        if (provider === 'cloudflare') {
+            setIsCustom(false);
+            if (!CLOUDFLARE_MODELS.some(item => item.id === model)) setM(CLOUDFLARE_DEFAULT_MODEL);
+            return;
+        }
         if (DEFAULT_MODELS.includes(model)) { setIsCustom(false); }
         else { setIsCustom(true); setCustomModel(model); setM('custom'); }
     }, []);
@@ -85,6 +99,16 @@ export default function SettingsView({
 
     const handleProviderChange = (nextProvider) => {
         setP(nextProvider);
+        if (nextProvider === 'cloudflare') {
+            if (!CLOUDFLARE_MODELS.some(item => item.id === m)) setM(CLOUDFLARE_DEFAULT_MODEL);
+            setIsCustom(false);
+            return;
+        }
+        if (m.startsWith('@cf/')) {
+            setM(nextProvider === 'gemini' ? 'gemini-3-flash-preview' : 'gpt-4o-mini');
+            setIsCustom(false);
+            return;
+        }
         if (nextProvider === 'gemini' && m !== 'custom' && !m.startsWith('gemini-')) {
             setM('gemini-3-flash-preview');
             setIsCustom(false);
@@ -98,7 +122,7 @@ export default function SettingsView({
     const testAi = async (kind) => {
         const finalModel = isCustom ? customModel.trim() : m;
         const finalUrl = url.trim() || 'https://api.openai.com/v1/chat/completions';
-        if (!k.trim() || !finalModel) {
+        if ((!isCloudflare && !k.trim()) || !finalModel) {
             setAiTestStatus(prev => ({ ...prev, [kind]: '请先填写 API Key 和模型名称' }));
             return;
         }
@@ -143,7 +167,7 @@ export default function SettingsView({
     };
 
     const save = () => {
-        const finalModel = isCustom ? customModel.trim() : m;
+        const finalModel = isCloudflare ? (CLOUDFLARE_MODELS.some(item => item.id === m) ? m : CLOUDFLARE_DEFAULT_MODEL) : (isCustom ? customModel.trim() : m);
         if (!finalModel) { alert("模型名称不能为空"); return; }
         const code = syncCode.trim();
         if (code && code.length < MIN_CODE_LENGTH) { alert(`家庭同步码至少 ${MIN_CODE_LENGTH} 位`); return; }
@@ -232,6 +256,17 @@ export default function SettingsView({
                 <div>
                     <label className="text-sm font-bold text-slate-600 mb-2 block">AI 接口</label>
                     <div className="space-y-3">
+                        <button onClick={() => handleProviderChange('cloudflare')} className={`w-full py-3 rounded-xl font-bold ${isCloudflare ? 'bg-orange-500 text-white' : 'bg-slate-100 text-slate-500'}`}>Cloudflare 免费 AI（推荐，不用填 Key）</button>
+                        {isCloudflare && (
+                            <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl p-3 space-y-1">
+                                <div>用本站自带的 Cloudflare Workers AI，每台设备都不用填 Key，国内也能用。</div>
+                                <div>{cfStatus?.error
+                                    ? `状态：${cfStatus.error}`
+                                    : cfStatus
+                                        ? `今日已用约 ${Math.min(100, Math.round(cfStatus.usedToday / cfStatus.budget * 100))}% 免费额度（共 ${cfStatus.requestsToday} 次），北京时间早上 8 点重置。`
+                                        : '正在读取今日额度...'}</div>
+                            </div>
+                        )}
                         <div className="grid grid-cols-2 gap-2">
                             <button onClick={() => handleProviderChange('gemini')} className={`py-3 rounded-xl font-bold ${p === 'gemini' ? 'bg-orange-500 text-white' : 'bg-slate-100 text-slate-500'}`}>Gemini</button>
                             <button onClick={() => handleProviderChange('openai')} className={`py-3 rounded-xl font-bold ${p === 'openai' ? 'bg-orange-500 text-white' : 'bg-slate-100 text-slate-500'}`}>OpenAI 兼容</button>
@@ -255,12 +290,14 @@ export default function SettingsView({
                                 <span>通过本站代理请求（推荐开启：中转站没开浏览器跨域时也能用；关闭则浏览器直连中转站）</span>
                             </label>
                         )}
-                        <input value={k} onChange={e => setK(e.target.value)} className="w-full p-3 bg-white border rounded-xl focus:border-orange-500 outline-none text-sm" placeholder="API Key" />
+                        {!isCloudflare && <input value={k} onChange={e => setK(e.target.value)} className="w-full p-3 bg-white border rounded-xl focus:border-orange-500 outline-none text-sm" placeholder="API Key" />}
                         <select value={m} onChange={e => {
                             if (e.target.value === 'custom') { setIsCustom(true); setM('custom'); }
                             else { setIsCustom(false); setM(e.target.value); }
                         }} className="w-full p-3 bg-white border rounded-xl focus:border-orange-500 outline-none text-sm">
-                            {p === 'gemini' ? (
+                            {isCloudflare ? (
+                                CLOUDFLARE_MODELS.map(item => <option key={item.id} value={item.id}>{item.label}</option>)
+                            ) : p === 'gemini' ? (
                                 <>
                                     <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
                                     <option value="gemini-3-pro-preview">gemini-3-pro-preview</option>
@@ -273,18 +310,18 @@ export default function SettingsView({
                                     <option value="deepseek-chat">deepseek-chat</option>
                                 </>
                             )}
-                            {fetchedModels.filter(modelId => !DEFAULT_MODELS.includes(modelId)).map(modelId => (
+                            {!isCloudflare && fetchedModels.filter(modelId => !DEFAULT_MODELS.includes(modelId)).map(modelId => (
                                 <option key={modelId} value={modelId}>{modelId}</option>
                             ))}
-                            <option value="custom">自定义模型</option>
+                            {!isCloudflare && <option value="custom">自定义模型</option>}
                         </select>
-                        {isCustom && (
+                        {!isCloudflare && isCustom && (
                             <input value={customModel} onChange={e => setCustomModel(e.target.value)} className="w-full p-3 bg-white border rounded-xl focus:border-orange-500 outline-none text-sm" placeholder="自定义模型名" />
                         )}
-                        <div className="flex items-center gap-3">
+                        {!isCloudflare && <div className="flex items-center gap-3">
                             <button onClick={fetchModels} className="shrink-0 py-2 px-3 rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">拉取模型</button>
                             {modelFetchStatus && <div className={`text-xs ${modelFetchStatus.startsWith('拉取失败') ? 'text-red-500' : 'text-slate-500'}`}>{modelFetchStatus}</div>}
-                        </div>
+                        </div>}
                         <div className="bg-slate-50 rounded-xl border border-slate-100 p-3 space-y-2">
                             <div className="text-sm font-bold text-slate-600">接口能力测试</div>
                             <div className="grid grid-cols-2 gap-2">

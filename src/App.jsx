@@ -26,10 +26,10 @@ export default function App() {
     });
     const [activeProfileId, setActiveProfileId] = useLocalStorageState('active_child_profile', 'default');
     const [stars, setStars] = useState('0');
-    const [provider, setProvider] = useLocalStorageState('llm_provider', 'gemini');
+    const [provider, setProvider] = useLocalStorageState('llm_provider', 'cloudflare');
     const [baseUrl, setBaseUrl] = useLocalStorageState('llm_base_url', 'https://api.openai.com/v1/chat/completions');
     const [apiKey, setApiKey] = useState(() => localStorage.getItem('llm_api_key') || localStorage.getItem('gemini_key') || '');
-    const [model, setModel] = useState(() => localStorage.getItem('llm_model') || localStorage.getItem('gemini_model') || 'gemini-3-flash-preview');
+    const [model, setModel] = useState(() => localStorage.getItem('llm_model') || localStorage.getItem('gemini_model') || '@cf/google/gemma-4-26b-a4b-it');
     const [voiceURI, setVoiceURI] = useLocalStorageState('app_voice_uri', 'auto');
     const [englishVoiceURI, setEnglishVoiceURI] = useLocalStorageState('app_english_voice_uri', 'auto');
     const [workspaceReady, setWorkspaceReady] = useState(false);

@@ -172,3 +172,19 @@ describe('llm 本站代理模式', () => {
         expect(String(seen[0]).includes('generativelanguage.googleapis.com')).toBe(true);
     });
 });
+
+describe('Cloudflare 免费 AI provider', () => {
+    it('不需要 API Key，走 /api/ai', async () => {
+        const { callLLM } = await import('../llm.js');
+        const original = globalThis.fetch;
+        let calledUrl = '';
+        globalThis.fetch = async (url) => { calledUrl = url; return { ok: true, status: 200, json: async () => ({ ok: true, text: '好的' }) }; };
+        try {
+            const r = await callLLM({ provider: 'cloudflare', apiKey: '', model: '', payload: { contents: [{ parts: [{ text: 'hi' }] }] } });
+            expect(r).toEqual({ text: '好的' });
+            expect(calledUrl).toBe('/api/ai');
+        } finally {
+            globalThis.fetch = original;
+        }
+    });
+});

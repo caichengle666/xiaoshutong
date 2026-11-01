@@ -7,6 +7,8 @@
   "d1_databases": [
     { "binding": "DB", "database_name": "ai-hanzi-tutor-sync" }
   ],
+  // Cloudflare Workers AI：设备上不用填 Key，用账号每天的免费额度
+  "ai": { "binding": "AI" },
   "assets": {
     "directory": "./dist",
     "not_found_handling": "single-page-application"

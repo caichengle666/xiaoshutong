@@ -1,7 +1,8 @@
 // Cloudflare Worker 入口：
 // 1. /api/llm  —— OpenAI 兼容接口的同源代理（解决第三方中转站不开放浏览器 CORS 的问题）
 // 2. /api/sync —— D1 云同步（孩子档案、生字本、错题本），用家庭同步码区分家庭，见 handleSync
-// 3. 其他请求  —— 交给静态资源（SPA，index.html 兜底）
+// 3. /api/ai   —— Cloudflare Workers AI（免 Key，用账号每天的免费额度），见 handleWorkersAI
+// 4. 其他请求  —— 交给静态资源（SPA，index.html 兜底）
 
 const ALLOWED_PATH_SUFFIXES = ['/chat/completions', '/models'];
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -213,6 +214,142 @@ async function handleSync(request, env, url) {
     return syncJson({ ok: false, error: '接口不存在' }, 404);
 }
 
+
+// ---------------- Cloudflare Workers AI（免 Key） ----------------
+// 设备上不用填 Key：Worker 通过 wrangler.jsonc 的 "ai" 绑定直接调用 Workers AI。
+// 免费额度是每天 10,000 Neurons（UTC 0 点重置）。为防止被外人刷光或在付费计划上产生费用，
+// 这里按模型单价估算每次用量，记在 D1 里，每天超过 AI_DAILY_NEURON_BUDGET 就停。
+// 单价来自 https://developers.cloudflare.com/workers-ai/platform/pricing/（neurons / 百万 tokens）。
+
+export const WORKERS_AI_MODELS = {
+    '@cf/google/gemma-4-26b-a4b-it': { label: 'Gemma 4（推荐，能看图）', vision: true, input: 9091, output: 27273 },
+    '@cf/mistralai/mistral-small-3.1-24b-instruct': { label: 'Mistral Small 3.1（能看图）', vision: true, input: 31876, output: 50488 },
+    '@cf/qwen/qwen3-30b-a3b-fp8': { label: 'Qwen3 30B（中文好，只能文字）', vision: false, input: 4625, output: 30475 },
+};
+export const DEFAULT_WORKERS_AI_MODEL = '@cf/google/gemma-4-26b-a4b-it';
+const AI_DAILY_NEURON_BUDGET = 9500;
+const AI_RATE_PER_MINUTE = 20;
+const AI_MAX_OUTPUT_TOKENS = 2048;
+let aiSchemaReady = null;
+
+export function estimateNeurons(modelId, usage) {
+    const price = WORKERS_AI_MODELS[modelId];
+    if (!price || !usage) return 0;
+    const input = Number(usage.prompt_tokens || usage.input_tokens || 0);
+    const output = Number(usage.completion_tokens || usage.output_tokens || 0);
+    return (input * price.input + output * price.output) / 1_000_000;
+}
+
+export function extractWorkersAIText(result) {
+    if (!result) return '';
+    if (typeof result === 'string') return result;
+    const choice = result.choices?.[0];
+    const content = choice?.message?.content ?? choice?.text;
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) return content.map(part => part?.text || '').join('');
+    if (typeof result.response === 'string') return result.response;
+    return '';
+}
+
+// 有些模型会把思考过程包在 <think> 里，孩子不需要看到
+export function stripThinking(text) {
+    return String(text || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+}
+
+const aiHits = new Map();
+function aiRateLimited(ip, now = Date.now()) {
+    const list = (aiHits.get(ip) || []).filter(t => t > now - 60_000);
+    list.push(now);
+    aiHits.set(ip, list);
+    if (aiHits.size > 5000) aiHits.clear();
+    return list.length > AI_RATE_PER_MINUTE;
+}
+
+function ensureAiSchema(db) {
+    if (!aiSchemaReady) {
+        aiSchemaReady = db.prepare('CREATE TABLE IF NOT EXISTS ai_usage (day TEXT PRIMARY KEY, neurons REAL NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0)')
+            .run().catch(error => { aiSchemaReady = null; throw error; });
+    }
+    return aiSchemaReady;
+}
+
+function utcDay(now = new Date()) {
+    return now.toISOString().slice(0, 10);
+}
+
+async function readUsage(env) {
+    if (!env.DB) return { neurons: 0, requests: 0 };
+    await ensureAiSchema(env.DB);
+    const row = await env.DB.prepare('SELECT neurons, requests FROM ai_usage WHERE day = ?').bind(utcDay()).first();
+    return { neurons: Number(row?.neurons || 0), requests: Number(row?.requests || 0) };
+}
+
+async function addUsage(env, neurons) {
+    if (!env.DB) return;
+    await env.DB.prepare(
+        'INSERT INTO ai_usage (day, neurons, requests) VALUES (?1, ?2, 1) ON CONFLICT (day) DO UPDATE SET neurons = neurons + ?2, requests = requests + 1'
+    ).bind(utcDay(), neurons).run();
+}
+
+async function handleWorkersAI(request, env) {
+    if (!isSameOrigin(request)) return syncJson({ ok: false, error: '不允许跨站调用' }, 403);
+    if (!env.AI) return syncJson({ ok: false, error: '服务器还没有绑定 Workers AI（用最新代码重新部署一次即可）' }, 503);
+
+    if (request.method === 'GET') {
+        const usage = await readUsage(env).catch(() => ({ neurons: 0, requests: 0 }));
+        return syncJson({
+            ok: true,
+            defaultModel: DEFAULT_WORKERS_AI_MODEL,
+            models: Object.entries(WORKERS_AI_MODELS).map(([id, info]) => ({ id, label: info.label, vision: info.vision })),
+            usedToday: Math.round(usage.neurons),
+            requestsToday: usage.requests,
+            budget: AI_DAILY_NEURON_BUDGET,
+        });
+    }
+    if (request.method !== 'POST') return syncJson({ ok: false, error: '仅支持 GET / POST' }, 405);
+
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    if (aiRateLimited(ip)) return syncJson({ ok: false, error: 'AI 请求太频繁，请稍等一分钟' }, 429);
+
+    const raw = await request.text();
+    if (raw.length > MAX_BODY_BYTES) return syncJson({ ok: false, error: '图片太大，请重新拍一张' }, 413);
+    let body;
+    try { body = JSON.parse(raw); } catch { return syncJson({ ok: false, error: '请求体不是合法 JSON' }, 400); }
+    const model = WORKERS_AI_MODELS[body?.model] ? body.model : DEFAULT_WORKERS_AI_MODEL;
+    const messages = Array.isArray(body?.messages) ? body.messages : null;
+    if (!messages?.length) return syncJson({ ok: false, error: '缺少 messages' }, 400);
+    const hasImage = messages.some(msg => Array.isArray(msg?.content) && msg.content.some(part => part?.type === 'image_url'));
+    if (hasImage && !WORKERS_AI_MODELS[model].vision) {
+        return syncJson({ ok: false, error: '这个模型不支持图片，请在设置里换成能看图的模型' }, 400);
+    }
+
+    const usage = await readUsage(env).catch(() => ({ neurons: 0 }));
+    if (usage.neurons >= AI_DAILY_NEURON_BUDGET) {
+        return syncJson({ ok: false, error: '今天的免费 AI 额度用完了，北京时间早上 8 点后恢复' }, 429);
+    }
+
+    let result;
+    try {
+        result = await env.AI.run(model, {
+            messages,
+            temperature: typeof body.temperature === 'number' ? body.temperature : 0.4,
+            max_tokens: AI_MAX_OUTPUT_TOKENS,
+        });
+    } catch (error) {
+        const message = String(error?.message || '');
+        if (/neuron|quota|limit|429|exceed/i.test(message)) {
+            return syncJson({ ok: false, error: '今天的免费 AI 额度用完了，北京时间早上 8 点后恢复' }, 429);
+        }
+        return syncJson({ ok: false, error: `Workers AI 出错：${message.slice(0, 200) || '未知错误'}` }, 502);
+    }
+    const text = stripThinking(extractWorkersAIText(result));
+    // 拿不到 usage 时按保守值估算，避免额度统计偏小
+    const neurons = estimateNeurons(model, result?.usage) || 30;
+    await addUsage(env, neurons).catch(() => {});
+    if (!text) return syncJson({ ok: false, error: 'AI 没有返回内容' }, 502);
+    return syncJson({ ok: true, text, model });
+}
+
 export default {
     async fetch(request, env) {
         const url = new URL(request.url);
@@ -224,6 +361,13 @@ export default {
                 return await handleSync(request, env, url);
             } catch {
                 return syncJson({ ok: false, error: '云同步服务出错，请稍后再试' }, 500);
+            }
+        }
+        if (url.pathname === '/api/ai') {
+            try {
+                return await handleWorkersAI(request, env);
+            } catch {
+                return syncJson({ ok: false, error: 'AI 服务出错，请稍后再试' }, 500);
             }
         }
         return env.ASSETS.fetch(request);

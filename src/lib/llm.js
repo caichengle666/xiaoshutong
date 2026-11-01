@@ -39,7 +39,46 @@ async function requestViaProxy({ target, apiKey, method, body }) {
   return envelope.data;
 }
 
+// Cloudflare Workers AI：走本站 /api/ai，不需要 API Key
+export const CLOUDFLARE_PROVIDER = 'cloudflare';
+export const CLOUDFLARE_DEFAULT_MODEL = '@cf/google/gemma-4-26b-a4b-it';
+export const CLOUDFLARE_MODELS = [
+  { id: '@cf/google/gemma-4-26b-a4b-it', label: 'Gemma 4（推荐，能看图）', vision: true },
+  { id: '@cf/mistralai/mistral-small-3.1-24b-instruct', label: 'Mistral Small 3.1（能看图）', vision: true },
+  { id: '@cf/qwen/qwen3-30b-a3b-fp8', label: 'Qwen3 30B（中文好，只能文字）', vision: false }
+];
+
+async function callWorkersAI({ model, payload }) {
+  try {
+    const response = await fetch('/api/ai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: model || CLOUDFLARE_DEFAULT_MODEL, messages: geminiPayloadToMessages(payload), temperature: 0.4 })
+    });
+    let data = null;
+    try { data = await response.json(); } catch { /* 非 JSON */ }
+    if (!data?.ok) {
+      if (response.status === 404 || data === null) return { error: '当前网址没有 Cloudflare AI 服务（本地 npm run dev 不可用，请用部署后的网址）' };
+      return { error: data.error || `请求失败 (${response.status})` };
+    }
+    return data.text ? { text: data.text } : { error: 'AI 没有返回内容' };
+  } catch {
+    return { error: '网络错误：连不上本站 AI 服务，请检查网络' };
+  }
+}
+
+export async function getWorkersAIStatus() {
+  try {
+    const response = await fetch('/api/ai', { headers: { 'Content-Type': 'application/json' } });
+    const data = await response.json();
+    return data?.ok ? data : { error: data?.error || `请求失败 (${response.status})` };
+  } catch {
+    return { error: '连不上本站 AI 服务' };
+  }
+}
+
 export async function callLLM({ provider, baseUrl, apiKey, model, payload, viaProxy }) {
+  if (provider === CLOUDFLARE_PROVIDER) return callWorkersAI({ model, payload });
   if (!apiKey) return { error: "请配置 API Key" };
 
   const isGemini = provider === 'gemini';
@@ -88,6 +127,7 @@ export async function callLLM({ provider, baseUrl, apiKey, model, payload, viaPr
 }
 
 export async function listModels({ provider, baseUrl, apiKey, viaProxy }) {
+  if (provider === CLOUDFLARE_PROVIDER) return { models: CLOUDFLARE_MODELS.map(item => item.id) };
   if (!apiKey) return { error: '请配置 API Key' };
 
   const isGemini = provider === 'gemini';

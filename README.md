@@ -56,7 +56,17 @@
 
 点右上角 **⚙️ 设置** → 找到 **AI 接口**：
 
-**方式 A：OpenAI 兼容接口（国内推荐）**
+**方式 A：Cloudflare 免费 AI（默认，推荐）**
+
+1. 点 **Cloudflare 免费 AI（推荐，不用填 Key）**
+2. 模型保持 **Gemma 4（推荐，能看图）** 即可
+3. 不用填任何 Key，每台设备都一样，国内也能用
+
+用的是部署账号自带的 Cloudflare Workers AI 免费额度（每天 10,000 Neurons，北京时间早上 8 点重置）。
+设置页会显示今天用了多少；为了不被外人刷光、也不会产生费用，服务器每天用到约 95% 就自动停止，第二天恢复。
+家庭日常使用（识字讲解、几次拍照批改）一般用不完。
+
+**方式 B：OpenAI 兼容接口（自己有 Key 时）**
 
 1. 点 **OpenAI 兼容**
 2. 填接口地址，例如 `https://api.openai.com/v1` 或你的中转站地址（以 `/v1` 结尾即可，会自动补全 `/chat/completions`）
@@ -64,19 +74,19 @@
 4. 填 **API Key**
 5. 点 **拉取模型**，从下拉框里选一个模型（也可选“自定义模型”手动填）
 
-**方式 B：Gemini**
+**方式 C：Gemini**
 
 1. 点 **Gemini**
 2. 填 Gemini API Key（可在 [Google AI Studio](https://aistudio.google.com/) 申请）
 3. 选模型
-> ⚠️ Gemini 模式是浏览器直连 Google，国内网络用不了，请用方式 A。
+> ⚠️ Gemini 模式是浏览器直连 Google，国内网络用不了，请用方式 A 或 B。
 
 **测试一下**：点 **测试文字**、**测试图片**，都显示“测试通过”再给孩子用。
 “测试图片”通过后，拍照加字、拍照批改、拍照录错题才能正常工作。
 
 最后点页面底部的 **保存设置**。
 
-> AI Key 只保存在这台设备的浏览器里，**每台设备都要各自填一次**（同步码不会同步 Key）。
+> 用方式 B/C 时，AI Key 只保存在这台设备的浏览器里，**每台设备都要各自填一次**（同步码不会同步 Key）。
 
 ### 第 3 步：添加孩子
 
@@ -191,7 +201,7 @@
 
 ## 部署到 Cloudflare（自己搭一份）
 
-项目以 **Cloudflare Worker** 形式部署：Worker 同时提供网页静态文件、`/api/llm` 同源代理和 `/api/sync` 云同步接口。推送到 `main` 分支后由 GitHub Actions 自动部署。
+项目以 **Cloudflare Worker** 形式部署：Worker 同时提供网页静态文件、`/api/ai` 免费 AI（Workers AI）、`/api/llm` 同源代理和 `/api/sync` 云同步接口。推送到 `main` 分支后由 GitHub Actions 自动部署。
 
 ### 第 1 步：Fork 或克隆仓库
 
@@ -214,6 +224,7 @@ git clone https://github.com/caichengle666/AI-Hanzi-Tutor.git
 }
 ```
 
+Workers AI 也只需要 `wrangler.jsonc` 里的 `"ai": { "binding": "AI" }`，不用填任何 Key。
 D1 数据库**不需要手动创建**：第一次部署时 wrangler 会按这个配置自动建库并绑定，表结构由 Worker 在第一次请求时自动创建。
 
 ### 第 3 步：创建 Cloudflare API Token
@@ -222,6 +233,7 @@ Cloudflare 控制台 → 右上角头像 → **我的个人资料 → API 令牌
 
 - 账户 → **Workers 脚本：编辑**
 - 账户 → **D1：编辑**（云同步建库需要，缺了首次部署会失败）
+- 账户 → **Workers AI：读取**（部分账号部署 AI 绑定时需要）
 
 ### 第 4 步：把 Token 填到 GitHub
 
@@ -266,6 +278,12 @@ npx wrangler dev   # 本地会自动建一个临时 D1，访问 http://127.0.0.1
 
 ## 常见问题
 
+**Cloudflare 免费 AI 提示“今天的免费 AI 额度用完了”**
+第二天北京时间早上 8 点自动恢复；急用可以临时切到方式 B 填自己的 Key。
+
+**Cloudflare 免费 AI 提示“服务器还没有绑定 Workers AI”**
+用最新代码重新部署一次。
+
 **测试文字失败：“网络错误 / 被浏览器跨域拦截”**
 用的是 OpenAI 兼容接口时，勾选“通过本站代理请求”。注意本地 `npm run dev` 没有代理，要用部署后的网址或 `wrangler dev`。
 
@@ -273,7 +291,7 @@ npx wrangler dev   # 本地会自动建一个临时 D1，访问 http://127.0.0.1
 国内网络无法直连 Google，改用 OpenAI 兼容接口 + 中转地址。
 
 **拍照批改 / 拍照加字没反应**
-先在设置里点“测试图片”。不通过说明当前模型不支持图片，换一个支持视觉的模型（如 gpt-4o、gpt-4o-mini、gemini 系列）。
+先在设置里点“测试图片”。不通过说明当前模型不支持图片，换一个支持视觉的模型（如 Cloudflare 的 Gemma 4、gpt-4o、gemini 系列）。
 
 **没有声音或声音很怪**
 到设置里手动选一个中文/英文声音，优先选 [本地]；按页面里的提示下载系统语音包。iPhone 请先关闭静音键。
@@ -296,7 +314,7 @@ npx wrangler dev   # 本地会自动建一个临时 D1，访问 http://127.0.0.1
 
 - 前端：React 18 + Vite 5 + Tailwind CSS 3
 - 汉字笔顺：Hanzi Writer
-- AI：OpenAI 兼容接口 / Google Gemini（Key 由家长在设备上填写）
+- AI：Cloudflare Workers AI（默认，免 Key）/ OpenAI 兼容接口 / Google Gemini
 - 语音：Web Speech API（朗读 + 识别），ResponsiveVoice 兜底
 - 本地存储：IndexedDB（孩子数据）+ localStorage（设置）
 - 后端：Cloudflare Worker + D1（同源代理、云同步）
@@ -313,7 +331,7 @@ npx wrangler dev   # 本地会自动建一个临时 D1，访问 http://127.0.0.1
 │       ├── cloudSync.js         # D1 云同步客户端
 │       ├── childData.js         # 备份导入导出
 │       └── reviewNotebook.js    # 错题本与复习计划
-├── worker/index.js              # Cloudflare Worker：/api/llm 代理、/api/sync 云同步、静态资源
+├── worker/index.js              # Cloudflare Worker：/api/ai 免费 AI、/api/llm 代理、/api/sync 云同步、静态资源
 ├── public/                      # PWA manifest、Service Worker、图标
 ├── wrangler.jsonc               # Worker 与 D1 配置
 └── .github/workflows/           # 推送 main 自动部署
