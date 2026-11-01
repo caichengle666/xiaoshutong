@@ -201,7 +201,7 @@
 
 ## 部署到 Cloudflare（自己搭一份）
 
-项目以 **Cloudflare Worker** 形式部署：Worker 同时提供网页静态文件、`/api/ai` 免费 AI（Workers AI）、`/api/llm` 同源代理和 `/api/sync` 云同步接口。推送到 `main` 分支后由 GitHub Actions 自动部署。
+项目以 **Cloudflare Worker** 形式部署：Worker 同时提供网页静态文件、`/api/ai` 免费 AI（Workers AI）、`/api/llm` 同源代理和 `/api/sync` 云同步接口。推送到 `main` 分支后由 Cloudflare Workers Builds 自动构建部署（不需要在 GitHub 保存任何 Token）。
 
 ### 第 1 步：Fork 或克隆仓库
 
@@ -227,27 +227,22 @@ git clone https://github.com/caichengle666/xiaoshutong.git
 Workers AI 也只需要 `wrangler.jsonc` 里的 `"ai": { "binding": "AI" }`，不用填任何 Key。
 D1 数据库**不需要手动创建**：第一次部署时 wrangler 会按这个配置自动建库并绑定，表结构由 Worker 在第一次请求时自动创建。
 
-### 第 3 步：创建 Cloudflare API Token
+### 第 3 步：在 Cloudflare 连接 GitHub 仓库（自动部署）
 
-Cloudflare 控制台 → 右上角头像 → **我的个人资料 → API 令牌 → 创建令牌**，用“编辑 Cloudflare Workers”模板，并确认包含：
+Cloudflare 控制台 → **Workers 和 Pages** → 打开你的 Worker → **设置 → 构建 → 连接 Git 存储库**：
 
-- 账户 → **Workers 脚本：编辑**
-- 账户 → **D1：编辑**（云同步建库需要，缺了首次部署会失败）
-- 账户 → **Workers AI：读取**（部分账号部署 AI 绑定时需要）
+- 选择 GitHub，授权 Cloudflare 应用访问本仓库
+- 分支：`main`
+- 构建命令：`npm run build`
+- 部署命令：`npx wrangler deploy`
+- 根目录：`/`
 
-### 第 4 步：把 Token 填到 GitHub
+### 第 4 步：部署
 
-GitHub 仓库 → **Settings → Secrets and variables → Actions → New repository secret**：
-
-- Name：`CLOUDFLARE_API_TOKEN`
-- Value：上一步生成的 Token
-
-### 第 5 步：部署
-
-推送到 `main` 分支即可自动部署（也可以在 **Actions → Deploy to Cloudflare → Run workflow** 手动触发）。
+以后推送到 `main` 分支，Cloudflare 会自动拉取、构建并部署；在 Worker 的 **部署 / 构建** 页面能看到每次构建日志。
 部署成功后，在 Cloudflare 控制台 → Workers 里能看到访问地址（`*.workers.dev`），也可以绑定自己的域名。
 
-### 手动部署（不用 GitHub Actions）
+### 手动部署（不连 GitHub 时）
 
 ```bash
 npm install
