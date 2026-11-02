@@ -181,3 +181,23 @@ export async function syncAll(profiles) {
         throw error;
     }
 }
+
+// ---- 云端历史版本：云端数据被覆盖前服务器会留一份，可一键找回 ----
+export function getDeviceId() {
+    return deviceId();
+}
+
+export async function listHistory(profileId) {
+    const { items } = await request(`/api/sync/history/${encodeURIComponent(profileId)}`);
+    return items;
+}
+
+// 把某个历史版本作为“最新”数据写回本机并上传（当前云端版本也会先被存进历史）
+export async function restoreHistory(profileId, versionId) {
+    const version = await request(`/api/sync/history/${encodeURIComponent(profileId)}/${versionId}`);
+    const updatedAt = new Date().toISOString();
+    await applyRemoteWorkspace(profileId, { updatedAt, data: version.data });
+    await pushNow(profileId, updatedAt, version.data);
+    setStatus({ state: 'ok', message: '' });
+    return true;
+}

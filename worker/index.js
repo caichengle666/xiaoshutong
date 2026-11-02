@@ -150,11 +150,69 @@ export function syncRateLimited(ip, now = Date.now(), limit = SYNC_RATE_PER_MINU
 
 function ensureSchema(db) {
     if (!schemaReady) {
-        schemaReady = db.prepare(
-            'CREATE TABLE IF NOT EXISTS workspaces (family TEXT NOT NULL, profile_id TEXT NOT NULL, updated_at TEXT NOT NULL, device TEXT, data TEXT NOT NULL, PRIMARY KEY (family, profile_id))'
-        ).run().catch(error => { schemaReady = null; throw error; });
+        schemaReady = (async () => {
+            await db.prepare(
+                'CREATE TABLE IF NOT EXISTS workspaces (family TEXT NOT NULL, profile_id TEXT NOT NULL, updated_at TEXT NOT NULL, device TEXT, data TEXT NOT NULL, PRIMARY KEY (family, profile_id))'
+            ).run();
+            await db.prepare(
+                'CREATE TABLE IF NOT EXISTS workspace_history (id INTEGER PRIMARY KEY AUTOINCREMENT, family TEXT NOT NULL, profile_id TEXT NOT NULL, updated_at TEXT NOT NULL, device TEXT, data TEXT NOT NULL, saved_at TEXT NOT NULL)'
+            ).run();
+            await db.prepare('CREATE INDEX IF NOT EXISTS workspace_history_lookup ON workspace_history (family, profile_id, id)').run();
+        })().catch(error => { schemaReady = null; throw error; });
     }
     return schemaReady;
+}
+
+// ---------------- 云端历史版本 ----------------
+// 每次云端数据被覆盖前，把旧版本存一份。同一台设备连续保存时最多 20 分钟存一份，
+// 换了设备一定存（两台设备互相覆盖时能找回）。每个孩子保留最近 HISTORY_KEEP 份。
+export const HISTORY_KEEP = 30;
+export const HISTORY_MIN_GAP_MS = 20 * 60 * 1000;
+
+export function shouldSnapshot(existing, nextDevice, lastSavedAt, now = Date.now()) {
+    if (!existing) return false;
+    if ((existing.device || '') !== (nextDevice || '')) return true;
+    if (!lastSavedAt) return true;
+    return now - Date.parse(lastSavedAt) >= HISTORY_MIN_GAP_MS;
+}
+
+async function snapshotBeforeOverwrite(db, family, profileId, existing, nextDevice) {
+    const last = await db
+        .prepare('SELECT saved_at FROM workspace_history WHERE family = ? AND profile_id = ? ORDER BY id DESC LIMIT 1')
+        .bind(family, profileId)
+        .first();
+    if (!shouldSnapshot(existing, nextDevice, last?.saved_at)) return;
+    await db.prepare(
+        'INSERT INTO workspace_history (family, profile_id, updated_at, device, data, saved_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)'
+    ).bind(family, profileId, existing.updated_at, existing.device || '', existing.data, new Date().toISOString()).run();
+    await db.prepare(
+        `DELETE FROM workspace_history WHERE family = ?1 AND profile_id = ?2 AND id NOT IN
+         (SELECT id FROM workspace_history WHERE family = ?1 AND profile_id = ?2 ORDER BY id DESC LIMIT ?3)`
+    ).bind(family, profileId, HISTORY_KEEP).run();
+}
+
+async function handleHistory(request, env, family, parts) {
+    if (request.method !== 'GET') return syncJson({ ok: false, error: '仅支持 GET' }, 405);
+    const profileId = decodeURIComponent(parts[0] || '');
+    if (!PROFILE_ID_RE.test(profileId)) return syncJson({ ok: false, error: '档案 ID 不合法' }, 400);
+    if (parts.length === 1) {
+        const { results } = await env.DB
+            .prepare('SELECT id, updated_at, device, saved_at, length(data) AS size FROM workspace_history WHERE family = ? AND profile_id = ? ORDER BY id DESC')
+            .bind(family, profileId)
+            .all();
+        return syncJson({
+            ok: true,
+            items: (results || []).map(row => ({ id: row.id, updatedAt: row.updated_at, device: row.device, savedAt: row.saved_at, size: row.size }))
+        });
+    }
+    const id = Number(parts[1]);
+    if (!Number.isInteger(id) || id <= 0) return syncJson({ ok: false, error: '版本 ID 不合法' }, 400);
+    const row = await env.DB
+        .prepare('SELECT id, updated_at, data FROM workspace_history WHERE family = ? AND profile_id = ? AND id = ?')
+        .bind(family, profileId, id)
+        .first();
+    if (!row) return syncJson({ ok: false, error: '这个历史版本不存在' }, 404);
+    return syncJson({ ok: true, id: row.id, updatedAt: row.updated_at, data: JSON.parse(row.data) });
 }
 
 // ---------------- 家长主人码（防止外人用本站 AI / 同步） ----------------
@@ -205,6 +263,7 @@ async function handleSync(request, env, url) {
     await ensureSchema(env.DB);
 
     const rest = url.pathname.replace(/^\/api\/sync\/?/, '').replace(/\/+$/, '');
+    if (rest.startsWith('history/')) return handleHistory(request, env, family, rest.split('/').slice(1));
 
     if (request.method === 'GET' && !rest) {
         const { results } = await env.DB
@@ -231,12 +290,20 @@ async function handleSync(request, env, url) {
             return syncJson({ ok: false, error: '缺少 updatedAt 或 data' }, 400);
         }
         const data = JSON.stringify(body.data);
+        const device = String(body.device || '').slice(0, 64);
+        const existing = await env.DB
+            .prepare('SELECT updated_at, device, data FROM workspaces WHERE family = ? AND profile_id = ?')
+            .bind(family, profileId)
+            .first();
+        if (existing && updatedAt > existing.updated_at) {
+            await snapshotBeforeOverwrite(env.DB, family, profileId, existing, device);
+        }
         // 只有比云端新才覆盖（后写者胜），旧数据不会冲掉新数据
         await env.DB.prepare(
             `INSERT INTO workspaces (family, profile_id, updated_at, device, data) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT (family, profile_id) DO UPDATE SET updated_at = excluded.updated_at, device = excluded.device, data = excluded.data
              WHERE excluded.updated_at > workspaces.updated_at`
-        ).bind(family, profileId, updatedAt, String(body.device || '').slice(0, 64), data).run();
+        ).bind(family, profileId, updatedAt, device, data).run();
         const row = await env.DB
             .prepare('SELECT updated_at, data FROM workspaces WHERE family = ? AND profile_id = ?')
             .bind(family, profileId)

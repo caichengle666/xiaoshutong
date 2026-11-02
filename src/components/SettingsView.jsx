@@ -5,7 +5,7 @@ import { loadReminder, saveReminder } from '../lib/reminder.js';
 import { getVoiceDownloadGuide, supportsSpeechSynthesis } from '../lib/deviceVoiceGuide.js';
 import { setVisionSupport } from '../lib/aiCapabilities.js';
 import { callLLM as requestLLM, listModels, CLOUDFLARE_MODELS, CLOUDFLARE_DEFAULT_MODEL, getWorkersAIStatus } from '../lib/llm.js';
-import { MIN_CODE_LENGTH, getSyncCode, setSyncCode } from '../lib/cloudSync.js';
+import { MIN_CODE_LENGTH, getDeviceId, getSyncCode, listHistory, restoreHistory, setSyncCode } from '../lib/cloudSync.js';
 
 const DEFAULT_MODELS = [...CLOUDFLARE_MODELS.map(item => item.id), 'gemini-3-flash-preview', 'gemini-3-pro-preview', 'gemini-2.0-flash-exp', 'gpt-4o-mini', 'gpt-4o', 'deepseek-chat'];
 
@@ -40,7 +40,7 @@ export default function SettingsView({
     viaProxy, setViaProxy,
     voiceURI, setVoiceURI, englishVoiceURI, setEnglishVoiceURI,
     profiles, activeProfileId, setActiveProfileId, addProfile, renameProfile, deleteProfile,
-    exportActiveChildData, importActiveChildData, syncStatus, onSyncNow, onBack
+    exportActiveChildData, importActiveChildData, syncStatus, onSyncNow, onRestored, onBack
 }) {
     const [p, setP] = useState(provider);
     const [url, setUrl] = useState(baseUrl);
@@ -58,6 +58,36 @@ export default function SettingsView({
     const [syncCode, setSyncCodeInput] = useState(() => getSyncCode());
     const [syncMessage, setSyncMessage] = useState('');
     const [cfStatus, setCfStatus] = useState(null);
+    const [history, setHistory] = useState(null);
+    const [historyMessage, setHistoryMessage] = useState('');
+
+    useEffect(() => { setHistory(null); setHistoryMessage(''); }, [activeProfileId]);
+
+    const loadHistory = async () => {
+        if (!getSyncCode()) { setHistoryMessage('先填家庭同步码并同步一次'); return; }
+        setHistoryMessage('正在读取...');
+        try {
+            const items = await listHistory(activeProfileId);
+            setHistory(items);
+            setHistoryMessage(items.length ? '' : '还没有历史版本（云端数据被覆盖时才会自动保存）');
+        } catch (error) {
+            setHistoryMessage(`读取失败：${error.message || '请检查网络'}`);
+        }
+    };
+
+    const restoreVersion = async (item) => {
+        const name = profiles.find(profile => profile.id === activeProfileId)?.name || '这个孩子';
+        if (!confirm(`把「${name}」的数据恢复到 ${new Date(item.updatedAt).toLocaleString()} 的版本？\n现在的数据也会先存进历史，恢复错了还能再找回来。`)) return;
+        setHistoryMessage('正在恢复...');
+        try {
+            await restoreHistory(activeProfileId, item.id);
+            onRestored?.(activeProfileId);
+            setHistoryMessage('已恢复，其他设备同步后也会变成这个版本');
+            setHistory(await listHistory(activeProfileId));
+        } catch (error) {
+            setHistoryMessage(`恢复失败：${error.message || '请检查网络'}`);
+        }
+    };
     const isCloudflare = p === 'cloudflare';
 
     useEffect(() => {
@@ -238,6 +268,23 @@ export default function SettingsView({
                             </div>
                         </div>
                         <div className="text-xs text-slate-400">同步孩子档案、星星、生字本、听写记录和错题本。同步码就是你家数据的钥匙，请设得长一点、别告诉别人。</div>
+                        <details className="rounded-lg bg-white/70 border border-emerald-100 p-3 text-sm" onToggle={e => { if (e.currentTarget.open && history === null) loadHistory(); }}>
+                            <summary className="cursor-pointer font-bold text-emerald-700">历史版本（数据被覆盖了？点这里找回）</summary>
+                            <div className="mt-2 space-y-2">
+                                <div className="text-xs text-slate-500">当前孩子：{profiles.find(profile => profile.id === activeProfileId)?.name}。云端数据被别的设备覆盖前会自动留一份，每个孩子保留最近 30 份。</div>
+                                {history?.map(item => (
+                                    <div key={item.id} className="flex items-center justify-between gap-2 bg-white rounded-lg border border-slate-100 p-2">
+                                        <div className="text-xs text-slate-600">
+                                            <div className="font-bold">{new Date(item.updatedAt).toLocaleString()}</div>
+                                            <div className="text-slate-400">{item.device === getDeviceId() ? '本机' : '其他设备'} · {Math.max(1, Math.round(item.size / 1024))} KB</div>
+                                        </div>
+                                        <button onClick={() => restoreVersion(item)} className="shrink-0 py-1 px-3 rounded-lg bg-emerald-500 text-white text-xs font-bold">恢复</button>
+                                    </div>
+                                ))}
+                                {historyMessage && <div className="text-xs text-slate-500">{historyMessage}</div>}
+                                <button onClick={loadHistory} className="text-xs text-emerald-600 font-bold">刷新列表</button>
+                            </div>
+                        </details>
                     </div>
                 </div>
 
