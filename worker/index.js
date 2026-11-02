@@ -282,7 +282,7 @@ async function handleSync(request, env, url) {
         const profileId = decodeURIComponent(rest);
         if (!PROFILE_ID_RE.test(profileId)) return syncJson({ ok: false, error: '档案 ID 不合法' }, 400);
         const raw = await request.text();
-        if (raw.length > SYNC_MAX_BYTES) return syncJson({ ok: false, error: '这个孩子的数据太大，超过云同步上限' }, 413);
+        if (new TextEncoder().encode(raw).length > SYNC_MAX_BYTES) return syncJson({ ok: false, error: '这个孩子的数据太大，超过云同步上限' }, 413);
         let body;
         try { body = JSON.parse(raw); } catch { return syncJson({ ok: false, error: '请求体不是合法 JSON' }, 400); }
         const updatedAt = String(body?.updatedAt || '');
